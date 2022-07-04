@@ -1,0 +1,15 @@
+[package]
+name = "coalescent-database"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "*"
+clap = { version="3", features=["derive"] }
+futures = "0.3"
+home = "0.5.3"
+rocksdb = "0.18.0"
+rmp-serde = "1"
+serde = { version="1", features=["derive"] }
+tokio = { version="1", features=["full"] }
+tokio-util = { version = "0.7.3", features=["codec"] }
