@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use clap::{Parser, Subcommand};
 use coalescent_database::{
     engine::{Request, Response},
-    server::{Client, WireRequest, WireResponse},
+    server::{Client, WireMessage},
 };
 use futures::{SinkExt, StreamExt};
 
@@ -42,10 +42,15 @@ async fn main() {
             .expect("failed to read tcp stream")
             .expect("failed to decode frame"),
     );
+
+    // process response
     match response {
-        Response::Value => println!("DB::RESPONSE::VALUE"),
-        Response::Ok => println!("DB::RESPONSE::OK"),
-        Response::Error => println!("DB::RESPONSE::ERROR"),
+        Ok(response) => match response {
+            Response::Value => println!("DB::RESPONSE::VALUE"),
+            Response::Ok => println!("DB::RESPONSE::OK"),
+            Response::Error => println!("DB::RESPONSE::ERROR"),
+        },
+        Err(e) => println!("{}", e),
     }
 }
 
@@ -55,15 +60,20 @@ fn pack_request(command: Commands) -> Bytes {
         Commands::Read { .. } => Request::Read,
         Commands::Delete { .. } => Request::Delete,
     };
-    let wire_request = WireRequest::new(request);
-    rmp_serde::to_vec(&wire_request)
+    let wire_message = WireMessage::Request(request);
+    rmp_serde::to_vec(&wire_message)
         .expect("msg pack serialize fail")
         .into()
 }
 
-fn unpack_response(bytes: BytesMut) -> Response {
-    let response: WireResponse =
+fn unpack_response(bytes: BytesMut) -> Result<Response, String> {
+    let message: WireMessage =
         rmp_serde::from_slice(bytes.as_ref()).expect("msgpack deserialization error");
 
-    response.body
+    let result = match message {
+        WireMessage::Response(response) => Ok(response),
+        _ => Err(String::from("Unexpected wire message")),
+    };
+
+    result
 }

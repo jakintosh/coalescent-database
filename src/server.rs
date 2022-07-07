@@ -1,4 +1,4 @@
-use crate::engine::{Request, RequestDesc, RequestTx, Response, ResponseRx};
+use crate::engine::{Message, MessageRx, MessageTx, Request, Response};
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -13,29 +13,15 @@ use tokio::net::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-#[derive(Serialize, Deserialize)]
-pub struct WireRequest {
-    pub body: Request,
-}
-impl WireRequest {
-    pub fn new(request: Request) -> WireRequest {
-        WireRequest { body: request }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct WireResponse {
-    pub body: Response,
-}
-impl WireResponse {
-    pub fn new(response: Response) -> WireResponse {
-        WireResponse { body: response }
-    }
-}
-
 type SinkTableLock = Arc<Mutex<SinkTable>>;
 type NetworkFrameRead = FramedRead<OwnedReadHalf, LengthDelimitedCodec>;
 type NetworkFrameWrite = FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>;
+
+#[derive(Serialize, Deserialize)]
+pub enum WireMessage {
+    Request(Request),
+    Response(Response),
+}
 
 struct SinkTable {
     id: usize,
@@ -83,16 +69,16 @@ impl Client {
 
 pub struct Server {
     port: u16,
-    request_tx: RequestTx,
-    response_rx: ResponseRx,
+    message_tx: MessageTx,
+    message_rx: MessageRx,
     sink_table_lock: SinkTableLock,
 }
 impl Server {
-    pub fn new(port: u16, request_tx: RequestTx, response_rx: ResponseRx) -> Server {
+    pub fn new(port: u16, message_tx: MessageTx, message_rx: MessageRx) -> Server {
         Server {
             port,
-            request_tx,
-            response_rx,
+            message_tx,
+            message_rx,
             sink_table_lock: Arc::new(Mutex::new(SinkTable::new())),
         }
     }
@@ -100,8 +86,8 @@ impl Server {
     pub async fn listen(self) {
         let Server {
             port,
-            request_tx,
-            response_rx,
+            message_tx,
+            message_rx,
             sink_table_lock: lock,
         } = self;
 
@@ -110,15 +96,15 @@ impl Server {
         println!("coalescentdb: server started at {}", address);
 
         tokio::select! {
-            _ = Server::accept_connections(listener, lock.clone(), request_tx) => {}
-            _ = Server::process_responses(lock.clone(), response_rx) => {}
+            _ = Server::accept_connections(listener, lock.clone(), message_tx) => {}
+            _ = Server::process_responses(lock.clone(), message_rx) => {}
         };
     }
 
     async fn accept_connections(
         listener: TcpListener,
         sink_table_lock: SinkTableLock,
-        request_tx: RequestTx,
+        message_tx: MessageTx,
     ) {
         loop {
             match listener.accept().await {
@@ -129,7 +115,7 @@ impl Server {
                     let stream = NetworkFrameRead::new(read, LengthDelimitedCodec::new());
                     let sink = NetworkFrameWrite::new(write, LengthDelimitedCodec::new());
 
-                    let request_tx = request_tx.clone();
+                    let message_tx = message_tx.clone();
                     let sink_id;
                     {
                         sink_id = sink_table_lock.lock().unwrap().insert(sink);
@@ -139,7 +125,7 @@ impl Server {
                         stream,
                         sink_id,
                         sink_table_lock.clone(),
-                        request_tx,
+                        message_tx,
                     ));
                 }
                 Err(e) => println!("couldn't accept client: {:?}", e),
@@ -151,9 +137,10 @@ impl Server {
         mut stream: NetworkFrameRead,
         sink_id: usize,
         sink_table_lock: SinkTableLock,
-        request_tx: RequestTx,
+        message_tx: MessageTx,
     ) {
         while let Some(frame) = stream.next().await {
+            // decode the tcp frame
             let bytes = match frame {
                 Ok(b) => b,
                 Err(e) => {
@@ -161,20 +148,27 @@ impl Server {
                     continue;
                 }
             };
-            let wire_request: WireRequest = match rmp_serde::from_slice(bytes.as_ref()) {
+
+            // deserialize the frame bytes
+            let wire_message: WireMessage = match rmp_serde::from_slice(bytes.as_ref()) {
                 Ok(r) => r,
                 Err(e) => {
                     println!("msgpack deserialization fail: {:?}", e);
                     continue;
                 }
             };
-            let request = RequestDesc {
-                sink_id,
-                body: wire_request.body,
-            };
-            if let Err(_) = request_tx.send(request) {
-                // channel is closed, close the connection
-                break;
+
+            // process the wire message
+            match wire_message {
+                // if request, pass to engine
+                WireMessage::Request(request) => {
+                    let message = Message::Request { sink_id, request };
+                    if let Err(_) = message_tx.send(message) {
+                        // channel is closed, close the connection
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -183,31 +177,33 @@ impl Server {
         println!("coalescentdb: closing connection @ id: {}", sink_id);
     }
 
-    async fn process_responses(sink_table_lock: SinkTableLock, mut response_rx: ResponseRx) {
-        while let Some(response) = response_rx.recv().await {
-            let wire_response = WireResponse {
-                body: response.body,
-            };
-            let bytes = match rmp_serde::to_vec(&wire_response) {
-                Ok(b) => b,
-                Err(e) => {
-                    println!("msgpack serialization fail: {:?}", e);
-                    continue;
-                }
-            };
+    async fn process_responses(sink_table_lock: SinkTableLock, mut message_rx: MessageRx) {
+        while let Some(message) = message_rx.recv().await {
+            match message {
+                Message::Response { sink_id, response } => {
+                    let wire_message = WireMessage::Response(response);
+                    let bytes = match rmp_serde::to_vec(&wire_message) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            println!("msgpack serialization fail: {:?}", e);
+                            continue;
+                        }
+                    };
 
-            let sink_id = response.sink_id;
-            {
-                let mut sink_table = sink_table_lock.lock().unwrap();
-                let sink = match sink_table.get(sink_id) {
-                    Some(s) => s,
-                    None => {
-                        println!("can't send response, sink not found");
-                        continue;
+                    {
+                        let mut sink_table = sink_table_lock.lock().unwrap();
+                        let sink = match sink_table.get(sink_id) {
+                            Some(s) => s,
+                            None => {
+                                println!("can't send response, sink not found");
+                                continue;
+                            }
+                        };
+                        if let Err(_) = sink.send(bytes.into()).await {};
                     }
-                };
-                if let Err(_) = sink.send(bytes.into()).await {};
-            }
+                }
+                _ => {}
+            };
         }
     }
 }
