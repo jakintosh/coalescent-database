@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use clap::{Parser, Subcommand};
 use coalescent_database::{
     engine::{Request, Response},
-    server::{Client, WireMessage},
+    networking::{self, WireMessage},
 };
 use futures::{SinkExt, StreamExt};
 
@@ -28,7 +28,7 @@ async fn main() {
     let args = Args::parse();
 
     // connect to database
-    let (mut stream, mut sink) = Client::connect(27800).await;
+    let (mut stream, mut sink) = networking::connect(27800).await;
 
     // pack request and send
     let request = pack_request(args.command);
@@ -56,9 +56,9 @@ async fn main() {
 
 fn pack_request(command: Commands) -> Bytes {
     let request = match command {
-        Commands::Insert { .. } => Request::Insert,
-        Commands::Read { .. } => Request::Read,
-        Commands::Delete { .. } => Request::Delete,
+        Commands::Insert { .. } => Request::Store,
+        Commands::Read { .. } => Request::Get,
+        Commands::Delete { .. } => Request::Drop,
     };
     let wire_message = WireMessage::Request(request);
     rmp_serde::to_vec(&wire_message)

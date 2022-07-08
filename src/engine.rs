@@ -6,9 +6,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 #[derive(Deserialize, Serialize)]
 pub enum Request {
-    Read,
-    Insert,
-    Delete,
+    Store,
+    Get,
+    Drop,
+    Link,
+    Query,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -45,9 +47,11 @@ impl Engine {
             match message {
                 Message::Request { sink_id, request } => {
                     let response = match request {
-                        Request::Read => Response::Value,
-                        Request::Insert => Response::Ok,
-                        Request::Delete => Response::Ok,
+                        Request::Store => Response::Ok,
+                        Request::Get => Response::Value,
+                        Request::Drop => Response::Ok,
+                        Request::Link => Response::Ok,
+                        Request::Query => Response::Value,
                     };
                     let message = Message::Response { sink_id, response };
 

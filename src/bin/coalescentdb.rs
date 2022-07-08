@@ -1,4 +1,4 @@
-use coalescent_database::{engine::Engine, server::Server};
+use coalescent_database::{engine::Engine, networking};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -8,11 +8,11 @@ async fn main() {
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
     let (server_tx, server_rx) = mpsc::unbounded_channel();
 
-    let server = Server::new(server_port, server_tx, engine_rx);
+    // let server = Server::new(server_port, server_tx, engine_rx);
     let engine = Engine::new(engine_tx, server_rx);
 
     tokio::select! {
-        _ = server.listen() => {}
+        _ = networking::listen(server_port, server_tx, engine_rx) => {}
         _ = engine.run() => {}
     }
 }
