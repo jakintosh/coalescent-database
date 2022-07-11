@@ -22,7 +22,7 @@ pub(crate) enum Message {
 pub(crate) type MessageTx = UnboundedSender<Message>;
 pub(crate) type MessageRx = UnboundedReceiver<Message>;
 
-pub(crate) async fn run_sink_table(mut sink_message_rx: MessageRx) {
+pub(crate) async fn run(mut sink_message_rx: MessageRx) {
     let mut id = 0usize;
     let mut map = HashMap::new();
 
@@ -31,16 +31,19 @@ pub(crate) async fn run_sink_table(mut sink_message_rx: MessageRx) {
             Message::Insert { sink, id_tx } => {
                 let sink_id = id;
                 id = (std::num::Wrapping(id) + std::num::Wrapping(1)).0;
+                println!("inserting sink with id {}", sink_id);
                 map.insert(sink_id, sink);
-                match id_tx.send(id) {
+                match id_tx.send(sink_id) {
                     Ok(_) => {}
                     Err(_) => println!("failed to notify about insert"),
                 }
             }
             Message::Remove(sink_id) => {
+                println!("removing sink with id {}", sink_id);
                 map.remove(&sink_id);
             }
             Message::Send { id: sink_id, bytes } => {
+                println!("sending to sink with id {}", sink_id);
                 let sink = match map.get_mut(&sink_id) {
                     Some(s) => s,
                     None => {

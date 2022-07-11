@@ -31,7 +31,7 @@ pub async fn listen(port: u16, engine_message_tx: engine::MessageTx, server_mess
 
     // kick off processes
     tokio::select! {
-        _ = sink_table::run_sink_table(sink_message_rx) => {}
+        _ = sink_table::run(sink_message_rx) => {}
         _ = accept_connections(listener, engine_message_tx, sink_message_tx.clone()) => {}
         _ = poll_messages(server_message_rx, sink_message_tx) => {},
     };
@@ -52,26 +52,32 @@ async fn accept_connections(
                 let stream = NetworkFrameRead::new(read, LengthDelimitedCodec::new());
                 let sink = NetworkFrameWrite::new(write, LengthDelimitedCodec::new());
 
-                // prepare data to be moved into tokio task
-                let (id_tx, id_rx) = oneshot::channel();
+                // insert sink into sink table
+                let (id_tx, id_rx) = oneshot::channel(); // create a oneshot value return channel
                 if let Err(_) = sink_message_tx.send(sink_table::Message::Insert { sink, id_tx }) {
                     println!("sink table is closed, cannot accept any more connections, aborting");
                     return;
                 }
-                let sink_id = match id_rx.await {
-                    Ok(id) => id,
+
+                // wait for sink_id from sink table
+                match id_rx.await {
+                    Ok(sink_id) => {
+                        let engine_message_tx = engine_message_tx.clone();
+                        tokio::spawn(poll_connection(
+                            stream,
+                            sink_id,
+                            sink_message_tx.clone(),
+                            engine_message_tx,
+                        ));
+                    }
                     Err(_) => {
-                        println!("couldn't store connection sink");
+                        println!(
+                            "couldn't store connection sink for {}: dropping connection",
+                            addr
+                        );
                         continue;
                     }
                 };
-                let engine_message_tx = engine_message_tx.clone();
-                tokio::spawn(poll_connection(
-                    stream,
-                    engine_message_tx,
-                    sink_id,
-                    sink_message_tx.clone(),
-                ));
             }
             Err(e) => println!("couldn't accept client: {:?}", e),
         }
@@ -80,9 +86,9 @@ async fn accept_connections(
 
 async fn poll_connection(
     mut stream: NetworkFrameRead,
-    message_tx: engine::MessageTx,
     sink_id: usize,
     sink_message_tx: sink_table::MessageTx,
+    engine_message_tx: engine::MessageTx,
 ) {
     while let Some(frame) = stream.next().await {
         // decode the tcp frame
@@ -106,7 +112,7 @@ async fn poll_connection(
         // handle the wire message
         match wire_message {
             WireMessage::Request(request) => {
-                match message_tx.send(engine::Message::Request { sink_id, request }) {
+                match engine_message_tx.send(engine::Message::Request { sink_id, request }) {
                     Err(e) => println!("messsage channel was closed: {}", e),
                     _ => {}
                 }
@@ -118,7 +124,7 @@ async fn poll_connection(
     }
 
     // connection is closed, drop the sink
-    sink_message_tx.send(sink_table::Message::Remove(sink_id));
+    let _unused_result = sink_message_tx.send(sink_table::Message::Remove(sink_id));
     println!("coalescentdb: closing connection @ id: {}", sink_id);
 }
 
@@ -126,7 +132,10 @@ async fn poll_messages(mut message_rx: MessageRx, sink_message_tx: sink_table::M
     while let Some(message) = message_rx.recv().await {
         match message {
             Message::Response { sink_id, response } => {
+                // create response
                 let wire_message = WireMessage::Response(response);
+
+                // serialize to msgback bytes
                 let bytes = match rmp_serde::to_vec(&wire_message) {
                     Ok(b) => b,
                     Err(e) => {
@@ -135,10 +144,14 @@ async fn poll_messages(mut message_rx: MessageRx, sink_message_tx: sink_table::M
                     }
                 };
 
-                sink_message_tx.send(sink_table::Message::Send {
+                // send bytes via sink_id
+                if let Err(_) = sink_message_tx.send(sink_table::Message::Send {
                     id: sink_id,
                     bytes: bytes.into(),
-                });
+                }) {
+                    println!("sink table is closed, can no longer send responses, exiting");
+                    return;
+                }
             }
         };
     }
