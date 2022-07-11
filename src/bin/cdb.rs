@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use clap::{Parser, Subcommand};
 use coalescent_database::{
     engine::{Request, Response},
-    networking::{self, WireMessage},
+    networking::{client, WireMessage},
 };
 use futures::{SinkExt, StreamExt};
 
@@ -28,7 +28,7 @@ async fn main() {
     let args = Args::parse();
 
     // connect to database
-    let (mut stream, mut sink) = networking::connect(27800).await;
+    let (mut stream, mut sink) = client::connect(27800).await;
 
     // pack request and send
     let request = pack_request(args.command);

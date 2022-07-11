@@ -1,3 +1,5 @@
+use crate::networking::server;
+
 use bytes::Bytes;
 use home::home_dir;
 use rocksdb::DB;
@@ -22,21 +24,20 @@ pub enum Response {
 
 pub enum Message {
     Request { sink_id: usize, request: Request },
-    Response { sink_id: usize, response: Response },
 }
 pub(crate) type MessageTx = UnboundedSender<Message>;
 pub(crate) type MessageRx = UnboundedReceiver<Message>;
 
 pub struct Engine {
     db: DB,
-    message_tx: MessageTx,
+    server_message_tx: server::MessageTx,
     message_rx: MessageRx,
 }
 impl Engine {
-    pub fn new(message_tx: MessageTx, message_rx: MessageRx) -> Engine {
+    pub fn new(server_message_tx: server::MessageTx, message_rx: MessageRx) -> Engine {
         Engine {
             db: Engine::open_db(),
-            message_tx,
+            server_message_tx,
             message_rx,
         }
     }
@@ -53,14 +54,13 @@ impl Engine {
                         Request::Link => Response::Ok,
                         Request::Query => Response::Value,
                     };
-                    let message = Message::Response { sink_id, response };
+                    let message = server::Message::Response { sink_id, response };
 
-                    if let Err(_) = self.message_tx.send(message) {
+                    if let Err(_) = self.server_message_tx.send(message) {
                         // channel is closed, close the connection
                         break;
                     }
                 }
-                _ => continue,
             }
         }
     }
